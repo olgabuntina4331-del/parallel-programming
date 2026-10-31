@@ -6,11 +6,12 @@
 #include <algorithm>
 #include <limits>
 #include <omp.h>
+#include <string>
 
-//одна точка (x, y)
+//точка (x, y)
 struct Point {double x, y;};
 
-//чтение точек: сначала количество, затем пары x y
+//читаем точки
 bool readPoints(const std::string& filename, std::vector<Point>& points) {
     std::ifstream file(filename);
     int n;
@@ -20,8 +21,7 @@ bool readPoints(const std::string& filename, std::vector<Point>& points) {
     }
     points.resize(n);
     for (int i = 0; i < n; ++i) {
-        if (!(file >> points[i].x >> points[i].y) ||
-            !std::isfinite(points[i].x) || !std::isfinite(points[i].y)) {
+        if (!(file >> points[i].x >> points[i].y) || !std::isfinite(points[i].x) || !std::isfinite(points[i].y)) {
             std::cerr << "Error: invalid point " << i + 1 << '\n';
             return false;
         }
@@ -29,11 +29,11 @@ bool readPoints(const std::string& filename, std::vector<Point>& points) {
     return true;
 }
 
-//суммы x^k (k=0..6) и y*x^k (k=0..3) для нормальных уравнений
+//суммы для нормальных уравнений
 void calculateSums(const std::vector<Point>& points,double (&sumX)[7], double (&sumXY)[4]) {
     int n = static_cast<int>(points.size());
 
-    //reduction: каждый поток собирает свои суммы, затем они объединяются
+    //каждый поток собирает свои суммы, потом они объединяются
     #pragma omp parallel for reduction(+:sumX[:7],sumXY[:4])
     for (int i = 0; i < n; ++i) {
         double power = 1.0;
@@ -45,7 +45,7 @@ void calculateSums(const std::vector<Point>& points,double (&sumX)[7], double (&
     }
 }
 
-//решаем Ax=b методом Гаусса с выбором ведущей строки
+//решаем систему гауссом с выбором ведущей строки
 bool gaussianElimination(std::vector<std::vector<double>> A, std::vector<double> b, std::vector<double>& coefficients) {
     int n = static_cast<int>(b.size());
     for (int k = 0; k < n; ++k) {
@@ -73,7 +73,7 @@ bool gaussianElimination(std::vector<std::vector<double>> A, std::vector<double>
     return true;
 }
 
-//значение полинома по схеме Горнера a[0] + a[1]*x + a[2]*x^2 + ...
+//полином по схеме горнера
 double polynomial(double x, const std::vector<double>& a) {
     double y = 0.0;
     for (int j = static_cast<int>(a.size()) - 1; j >= 0; --j) {
@@ -82,9 +82,8 @@ double polynomial(double x, const std::vector<double>& a) {
     return y;
 }
 
-//сумма квадратов ошибок (параллельный расчёт)
-double squaredError(const std::vector<Point>& points,
-                    const std::vector<double>& a) {
+//сумма квадратов ошибок, параллельный расчёт
+double squaredError(const std::vector<Point>& points, const std::vector<double>& a) {
     double error = 0.0;
     int n = static_cast<int>(points.size());
     #pragma omp parallel for reduction(+:error)
@@ -107,13 +106,18 @@ void printPolynomial(const std::vector<double>& a) {
 
 int main() {
     std::vector<Point> points;
-    if (!readPoints("points.txt", points)) return 1;
+    if (!readPoints("points_100000.txt", points)) return 1;
 
     double sumX[7] = {};
     double sumXY[4] = {};
+
+    //начало вычислений
+    double startTime = omp_get_wtime();
+
+    //суммы для сист. норм. ур-й
     calculateSums(points, sumX, sumXY);
 
-    //нельзя определять больше коэффициентов, чем имеется точек
+    //коэффициентов меньше, чем есть точек
     int maxDegree = std::min(3, static_cast<int>(points.size()) - 1);
     double yScale = 0.0;
     for (const Point& p : points) yScale += p.y * p.y;
@@ -132,7 +136,7 @@ int main() {
         std::vector<std::vector<double>> A(size, std::vector<double>(size));
         std::vector<double> b(size);
 
-        //система нормальных уравнений: A[i][j]=sum(x^(i+j)), b[i]=sum(y*x^i)
+        //сист. норм. ур-й
         for (int i = 0; i < size; ++i) {
             b[i] = sumXY[i];
             for (int j = 0; j < size; ++j) A[i][j] = sumX[i + j];
@@ -157,6 +161,11 @@ int main() {
         }
     }
 
+    //время выполнения
+    double elapsed = omp_get_wtime() - startTime;
+
+    std::cout << "Calculation time (seconds): " << std::setprecision(9) << elapsed << std::setprecision(6) << "\n\n";
+    
     if (bestDegree == -1) {
         std::cerr << "Error: no polynomial found\n";
         return 1;
@@ -166,19 +175,18 @@ int main() {
     printPolynomial(bestCoefficients);
     std::cout << "SSE = " << bestError << "\n\n";
 
-    //выводим только первые 10 точек
-
+    //выводим первые 10 точек
     int count = std::min(10, static_cast<int>(points.size()));
 
     std::cout << "\nComparison (first " << count << " of " << points.size() << " points):\n";
 
-    //показываем исходное и рассчитанное значение
+    //исходное и рассчитанное значение
     for (int i = 0; i < count; ++i) {
         const Point& p = points[i];
         std::cout << p.x << "  " << p.y << "  " << polynomial(p.x, bestCoefficients) << '\n';
     }
 
-    //сохраняем коэффициенты, чтобы построить график в JupyterLab
+    //сохраняем коэффициенты, чтобы построить график
     std::ofstream result("result.txt");
     if (!result) {
         std::cerr << "Error: cannot create result.txt\n";
